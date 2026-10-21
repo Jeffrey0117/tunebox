@@ -44,13 +44,29 @@ test('control commands get increasing seq', () => {
   assert.equal(c2.state.control.trackId, 't_x');
 });
 
+test('seek/volume control args are sanitized', () => {
+  const s = mk();
+  const { id } = s.createRoom('r');
+  const seek = s.setControl(id, 'seek', { position: 93.4 });
+  assert.equal(seek.state.control.position, 93.4);
+  const badSeek = s.setControl(id, 'seek', { position: -5 });
+  assert.equal(badSeek.state.control.position, undefined);
+  const vol = s.setControl(id, 'volume', { volume: 250 });
+  assert.equal(vol.state.control.volume, 100); // clamped
+  const vol2 = s.setControl(id, 'volume', { volume: 33.7 });
+  assert.equal(vol2.state.control.volume, 34);
+  const badVol = s.setControl(id, 'volume', { volume: 'loud' });
+  assert.equal(badVol.state.control.volume, undefined);
+});
+
 test('status is sanitized', () => {
   const s = mk();
   const { id } = s.createRoom('r');
-  const r = s.setStatus(id, { trackId: 't_1', title: 'Song', position: '77', duration: 100, paused: 0 });
+  const r = s.setStatus(id, { trackId: 't_1', title: 'Song', position: '77', duration: 100, paused: 0, volume: 87 });
   assert.equal(r.status.position, 0); // non-number dropped
   assert.equal(r.status.duration, 100);
   assert.equal(r.status.paused, false);
+  assert.equal(r.status.volume, 87);
   assert.equal(s.getRoom(id).status.duration, 100); // persisted
   assert.equal(s.setStatus('XXXXXX', {}), null);
 });
