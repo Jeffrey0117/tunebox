@@ -91,6 +91,11 @@
   const $ = (id) => document.getElementById(id);
   let state = null;
   let isPlayer = false;
+  // Don't compare the server's status.updatedAt against this phone's clock —
+  // track server time per frame instead (phones' clocks drift).
+  let serverNow = 0;
+  let frameAt = 0;
+  const deviceId = `p_${Math.random().toString(36).slice(2, 10)}`;
 
   // ---- API helpers -------------------------------------------------------
   const api = (route, body) => fetch(`/api/rooms/${roomId}${route}`, {
@@ -101,7 +106,8 @@
 
   // ---- rendering ---------------------------------------------------------
   const fmt = (s) => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
-  const statusFresh = () => state?.status && Date.now() - state.status.updatedAt < 20000;
+  const statusAge = () => (serverNow - (state?.status?.updatedAt || 0)) + (Date.now() - frameAt);
+  const statusFresh = () => !!state?.status && statusAge() < 20000;
 
   function render() {
     if (!state) return;
@@ -114,6 +120,7 @@
     const cur = statusFresh() ? state.status.trackId : null;
     $('queue').replaceChildren(...q.map((t, i) => {
       const li = document.createElement('li');
+      li.dataset.trackId = t.id;
       if (t.id === cur) li.classList.add('current');
       const title = document.createElement('div');
       title.className = 't';
@@ -129,6 +136,12 @@
       return li;
     }));
 
+    renderStatus();
+  }
+
+  // Cheap path for the frequent status events: transport bar + row highlight
+  // only — never rebuilds the queue list.
+  function renderStatus() {
     if (statusFresh()) {
       const s = state.status;
       $('np').innerHTML = '';
@@ -139,6 +152,8 @@
     } else {
       $('np').textContent = '尚無播放中的裝置 — 按「🔊 在這支播放」開始';
     }
+    const cur = statusFresh() ? state.status.trackId : null;
+    for (const li of $('queue').children) li.classList.toggle('current', li.dataset.trackId === cur);
   }
 
   // ---- live updates ------------------------------------------------------
@@ -146,9 +161,19 @@
   const es = new EventSource(`/api/rooms/${roomId}/events`);
   es.addEventListener('state', (e) => {
     state = JSON.parse(e.data);
+    serverNow = state.now || serverNow;
+    frameAt = Date.now();
     if (lastCmdSeq === null) lastCmdSeq = state.control?.seq || 0; // never replay old commands
     render();
     if (isPlayer) handleControl();
+  });
+  es.addEventListener('status', (e) => {
+    if (!state) return;
+    const d = JSON.parse(e.data);
+    state.status = d.status;
+    serverNow = d.now || serverNow;
+    frameAt = Date.now();
+    renderStatus();
   });
   es.onerror = () => { /* EventSource auto-reconnects */ };
 
@@ -170,29 +195,52 @@
   let yt = null;
   let ytReady = false;
   let currentTrackId = null;
+  let lastIndex = 0;          // where we were if the current track gets deleted
   let wakeLock = null;
   let statusTimer = null;
+  let playerLoadToken = 0;    // invalidates an in-flight iframe-API load on exit
+  let consecutiveErrors = 0;
 
   const trackById = (id) => state.queue.find((t) => t.id === id);
   const indexOfCurrent = () => state.queue.findIndex((t) => t.id === currentTrackId);
 
+  async function acquireLock() {
+    if (!navigator.wakeLock) return;
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch { /* unsupported / denied */ }
+  }
+  const reacquireLock = () => {
+    if (document.visibilityState === 'visible' && isPlayer && !wakeLock) acquireLock();
+  };
+
   async function enterPlayerMode() {
+    // Another phone already playing? Don't silently start double audio.
+    if (statusFresh() && !state.status.paused && state.status.playerId !== deviceId
+        && !confirm('另一支手機好像正在播放中，仍要改在這支播放嗎？')) return;
     isPlayer = true;
+    const token = ++playerLoadToken;
     lastCmdSeq = state?.control?.seq || 0;
     $('playerView').style.display = 'block';
     $('modeBtn').textContent = '離開播放模式';
-    try { wakeLock = await navigator.wakeLock?.request('screen'); } catch { /* unsupported */ }
+    acquireLock();
     document.addEventListener('visibilitychange', reacquireLock);
-    if (!window.YT) {
-      const s = document.createElement('script');
-      s.src = 'https://www.youtube.com/iframe_api';
-      document.head.appendChild(s);
-      window.onYouTubeIframeAPIReady = initPlayer;
+    if (!window.YT?.Player) {
+      window.onYouTubeIframeAPIReady = () => { if (token === playerLoadToken && isPlayer) initPlayer(); };
+      if (!document.getElementById('ytapi')) {
+        const s = document.createElement('script');
+        s.id = 'ytapi';
+        s.src = 'https://www.youtube.com/iframe_api';
+        document.head.appendChild(s);
+      }
     } else initPlayer();
-    statusTimer = setInterval(postStatus, 5000);
+    statusTimer = setInterval(postStatus, 10000);
   }
   function exitPlayerMode() {
     isPlayer = false;
+    playerLoadToken += 1;
+    window.onYouTubeIframeAPIReady = () => {};
     $('playerView').style.display = 'none';
     $('modeBtn').textContent = '🔊 在這支播放';
     clearInterval(statusTimer);
@@ -200,26 +248,43 @@
     wakeLock?.release().catch(() => {});
     wakeLock = null;
     if (yt) { yt.destroy(); yt = null; ytReady = false; }
+    // yt.destroy() removes the #yt element — put the mount back for next time.
+    if (!document.getElementById('yt')) {
+      const mount = document.createElement('div');
+      mount.id = 'yt';
+      $('playerView').prepend(mount);
+    }
     currentTrackId = null;
   }
-  const reacquireLock = async () => {
-    if (document.visibilityState === 'visible' && isPlayer && !wakeLock) {
-      try { wakeLock = await navigator.wakeLock.request('screen'); } catch { /* ignore */ }
-    }
-  };
   $('modeBtn').onclick = () => (isPlayer ? exitPlayerMode() : enterPlayerMode());
 
   function initPlayer() {
+    if (!isPlayer) return;
     yt = new YT.Player('yt', {
       width: '100%', height: '100%',
       playerVars: { playsinline: 1, rel: 0 },
       events: {
-        onReady: () => { ytReady = true; const first = state.queue[0]; if (first) playTrack(first.id); },
+        onReady: () => {
+          ytReady = true;
+          const first = state.queue[0];
+          if (first) playTrack(first.id);
+          handleControl(); // a command may have queued up while the API loaded
+        },
         onStateChange: (e) => {
+          if (e.data === YT.PlayerState.PLAYING) consecutiveErrors = 0;
           if (e.data === YT.PlayerState.ENDED) playNext(1);
           else postStatus();
         },
-        onError: () => playNext(1) // unplayable / region-blocked → skip
+        onError: () => {
+          // unplayable / region-blocked → skip, but never spin on an all-bad queue
+          consecutiveErrors += 1;
+          if (consecutiveErrors >= Math.max(1, state.queue.length)) {
+            consecutiveErrors = 0;
+            flash('這些歌目前都播不了');
+            return;
+          }
+          setTimeout(() => { if (isPlayer) playNext(1); }, 1000);
+        }
       }
     });
   }
@@ -228,13 +293,16 @@
     const t = trackById(trackId);
     if (!t || !ytReady) return;
     currentTrackId = trackId;
+    lastIndex = indexOfCurrent();
     yt.loadVideoById(t.videoId);
     postStatus();
   }
   function playNext(dir) {
     if (!state.queue.length) return;
     let i = indexOfCurrent();
-    if (i < 0) i = 0; else i = (i + dir + state.queue.length) % state.queue.length;
+    // current track was deleted → continue from where it used to be
+    if (i < 0) i = Math.min(lastIndex, state.queue.length - 1);
+    else i = (i + dir + state.queue.length) % state.queue.length;
     playTrack(state.queue[i].id);
   }
   function playerToggle() {
@@ -244,12 +312,14 @@
     setTimeout(postStatus, 300);
   }
 
-  // Execute remote commands exactly once, in arrival order.
+  // Execute remote commands exactly once, in arrival order. A command that
+  // lands while the iframe API is still loading stays unconsumed and fires
+  // from onReady — never acknowledged-and-dropped.
   function handleControl() {
     const c = state.control;
     if (!c || c.seq <= lastCmdSeq) return;
-    lastCmdSeq = c.seq;
     if (!ytReady) return;
+    lastCmdSeq = c.seq;
     if (c.cmd === 'toggle') playerToggle();
     else if (c.cmd === 'play') { yt.playVideo(); setTimeout(postStatus, 300); }
     else if (c.cmd === 'pause') { yt.pauseVideo(); setTimeout(postStatus, 300); }
@@ -266,7 +336,8 @@
       title: t?.title || null,
       position: yt.getCurrentTime?.() || 0,
       duration: yt.getDuration?.() || 0,
-      paused: yt.getPlayerState?.() !== YT.PlayerState.PLAYING
+      paused: yt.getPlayerState?.() !== YT.PlayerState.PLAYING,
+      playerId: deviceId
     });
   }
 
@@ -274,6 +345,8 @@
   fetch(`/api/rooms/${roomId}`).then((r) => r.json()).then((b) => {
     if (b.success && !state) {
       state = b.data;
+      serverNow = state.now || Date.now();
+      frameAt = Date.now();
       if (lastCmdSeq === null) lastCmdSeq = state.control?.seq || 0;
       render();
     }

@@ -48,9 +48,11 @@ test('status is sanitized', () => {
   const s = mk();
   const { id } = s.createRoom('r');
   const r = s.setStatus(id, { trackId: 't_1', title: 'Song', position: '77', duration: 100, paused: 0 });
-  assert.equal(r.state.status.position, 0); // non-number dropped
-  assert.equal(r.state.status.duration, 100);
-  assert.equal(r.state.status.paused, false);
+  assert.equal(r.status.position, 0); // non-number dropped
+  assert.equal(r.status.duration, 100);
+  assert.equal(r.status.paused, false);
+  assert.equal(s.getRoom(id).status.duration, 100); // persisted
+  assert.equal(s.setStatus('XXXXXX', {}), null);
 });
 
 test('purge removes only idle rooms', () => {

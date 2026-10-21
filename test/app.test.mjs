@@ -58,14 +58,15 @@ test('SSE delivers initial state and mutation broadcasts', async () => {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
-  const nextState = async () => {
+  const nextEvent = async () => {
     for (;;) {
       const i = buf.indexOf('\n\n');
       if (i >= 0) {
         const frame = buf.slice(0, i);
         buf = buf.slice(i + 2);
         const data = frame.split('\n').find((l) => l.startsWith('data: '));
-        if (data) return JSON.parse(data.slice(6));
+        const event = frame.split('\n').find((l) => l.startsWith('event: '));
+        if (data) return { event: event ? event.slice(7) : 'message', data: JSON.parse(data.slice(6)) };
         continue;
       }
       const { value, done } = await reader.read();
@@ -74,15 +75,44 @@ test('SSE delivers initial state and mutation broadcasts', async () => {
     }
   };
 
-  const initial = await nextState();
-  assert.equal(initial.id, room.id);
-  assert.equal(initial.queue.length, 0);
+  const initial = await nextEvent();
+  assert.equal(initial.event, 'state');
+  assert.equal(initial.data.id, room.id);
+  assert.ok(Number.isInteger(initial.data.now)); // server clock for skew-free freshness checks
 
   await post(`/api/rooms/${room.id}/tracks`, { url: 'https://youtu.be/aaaaaaaaaaa' });
-  const updated = await nextState();
-  assert.equal(updated.queue.length, 1);
-  assert.equal(updated.queue[0].title, 'Mock Title');
+  const updated = await nextEvent();
+  assert.equal(updated.event, 'state');
+  assert.equal(updated.data.queue[0].title, 'Mock Title');
+
+  // player heartbeat must arrive as a small `status` event, not a full state fanout
+  const trackId = updated.data.queue[0].id;
+  await post(`/api/rooms/${room.id}/status`, { trackId, position: 5, duration: 100, paused: false, playerId: 'p_test' });
+  const statusEv = await nextEvent();
+  assert.equal(statusEv.event, 'status');
+  assert.equal(statusEv.data.status.trackId, trackId);
+  assert.equal(statusEv.data.status.playerId, 'p_test');
+  assert.equal(statusEv.data.queue, undefined);
   await reader.cancel();
+});
+
+test('global room-creation ceiling holds regardless of claimed IP', async () => {
+  const isolated = createApp({ store: createStore(':memory:'), publicDir: path.join(__dirname, '..', 'public'), titleLookup: async () => null });
+  await new Promise((r) => isolated.listen(0, '127.0.0.1', r));
+  const b = `http://127.0.0.1:${isolated.address().port}`;
+  try {
+    let last;
+    for (let i = 0; i < 31; i += 1) {
+      last = await fetch(`${b}/api/rooms`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': `10.0.${i}.${i}` }, // fresh bucket per request
+        body: '{}'
+      });
+    }
+    assert.equal(last.status, 429);
+  } finally {
+    isolated.close();
+  }
 });
 
 test('room page served for /r/:id, landing for /', async () => {
