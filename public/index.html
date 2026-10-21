@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>tunebox</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: system-ui, -apple-system, "Noto Sans TC", sans-serif; background: #0d0f14; color: #e8eaf0;
+         min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .card { width: 100%; max-width: 380px; }
+  h1 { font-size: 34px; letter-spacing: 1px; margin-bottom: 4px; }
+  h1 span { color: #4ade80; }
+  .sub { color: #8b90a0; font-size: 14px; margin-bottom: 32px; }
+  label { display: block; font-size: 13px; color: #8b90a0; margin: 18px 0 6px; }
+  input { width: 100%; padding: 13px 14px; font-size: 16px; border-radius: 12px; border: 1px solid #262a35;
+          background: #161922; color: #e8eaf0; outline: none; }
+  input:focus { border-color: #4ade80; }
+  button { width: 100%; margin-top: 10px; padding: 14px; font-size: 16px; font-weight: 600; border: none;
+           border-radius: 12px; cursor: pointer; }
+  .primary { background: #4ade80; color: #06290f; }
+  .secondary { background: #1d212c; color: #e8eaf0; }
+  .divider { display: flex; align-items: center; gap: 12px; color: #4a4f5e; font-size: 12px; margin: 26px 0 8px; }
+  .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: #262a35; }
+  .err { color: #f87171; font-size: 13px; margin-top: 8px; min-height: 18px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>tune<span>box</span></h1>
+  <div class="sub">共享點歌機 — 一支手機接音響播放，其他人改歌單、遙控</div>
+
+  <label>歌單名稱</label>
+  <input id="name" placeholder="我們的歌單" maxlength="100">
+  <button class="primary" id="create">建立新房間</button>
+
+  <div class="divider">或加入現有房間</div>
+  <label>房號（6 碼）</label>
+  <input id="code" placeholder="例如 K7MPX2" maxlength="6" autocapitalize="characters" autocomplete="off">
+  <button class="secondary" id="join">加入</button>
+  <div class="err" id="err"></div>
+</div>
+<script>
+  const err = (m) => { document.getElementById('err').textContent = m || ''; };
+  document.getElementById('create').onclick = async () => {
+    err();
+    try {
+      const res = await fetch('/api/rooms', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: document.getElementById('name').value.trim() || undefined }) });
+      const body = await res.json();
+      if (!body.success) return err(body.error || '建立失敗');
+      location.href = '/r/' + body.data.id;
+    } catch { err('連不上伺服器'); }
+  };
+  const join = async () => {
+    err();
+    const code = document.getElementById('code').value.trim().toUpperCase();
+    if (!/^[A-Z0-9]{6}$/.test(code)) return err('房號是 6 碼英數字');
+    const res = await fetch('/api/rooms/' + code).catch(() => null);
+    const body = res && await res.json().catch(() => null);
+    if (!body?.success) return err('找不到這個房間');
+    location.href = '/r/' + code;
+  };
+  document.getElementById('join').onclick = join;
+  document.getElementById('code').addEventListener('keydown', (e) => { if (e.key === 'Enter') join(); });
+</script>
+</body>
+</html>
