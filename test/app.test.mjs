@@ -9,11 +9,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let server;
 let base;
 
+let searchCalls = 0;
 before(async () => {
   server = createApp({
     store: createStore(':memory:'),
     publicDir: path.join(__dirname, '..', 'public'),
-    titleLookup: async (videoId) => (videoId === 'aaaaaaaaaaa' ? 'Mock Title' : null)
+    titleLookup: async (videoId) => (videoId === 'aaaaaaaaaaa' ? 'Mock Title' : null),
+    searchLookup: async (q) => {
+      searchCalls += 1;
+      if (q === 'boom') return null;
+      return [{ videoId: 'ccccccccccc', title: `Result for ${q}`, channel: 'Ch', duration: '3:00', thumbnail: 'https://i.ytimg.com/vi/ccccccccccc/mqdefault.jpg' }];
+    },
+    resolveLookup: async (ext) => (ext.type === 'spotify' ? 'Resolved Spotify Song' : null)
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
@@ -113,6 +120,32 @@ test('global room-creation ceiling holds regardless of claimed IP', async () => 
   } finally {
     isolated.close();
   }
+});
+
+test('search endpoint: text query, link resolution, cache, failure modes', async () => {
+  const room = (await post('/api/rooms', { name: 'search' })).data;
+  const get = (q) => fetch(`${base}/api/rooms/${room.id}/search?q=${encodeURIComponent(q)}`).then((r) => r.json());
+
+  const r1 = await get('my song');
+  assert.equal(r1.success, true);
+  assert.equal(r1.data.query, 'my song');
+  assert.equal(r1.data.results[0].title, 'Result for my song');
+
+  const callsBefore = searchCalls;
+  await get('my song'); // cached — no second upstream search
+  assert.equal(searchCalls, callsBefore);
+
+  const r2 = await get('https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8');
+  assert.equal(r2.data.query, 'Resolved Spotify Song');
+
+  const unresolvable = await get('https://music.apple.com/tw/song/x/123'); // resolveLookup mock returns null for apple
+  assert.equal(unresolvable.success, false);
+
+  const down = await fetch(`${base}/api/rooms/${room.id}/search?q=boom`);
+  assert.equal(down.status, 502);
+
+  assert.equal((await fetch(`${base}/api/rooms/${room.id}/search?q=`)).status, 400);
+  assert.equal((await fetch(`${base}/api/rooms/ZZZZZ2/search?q=x`)).status, 404);
 });
 
 test('room page served for /r/:id, landing for /', async () => {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createStore } from '../lib/store.js';
-import { parseVideoId } from '../lib/youtube.js';
+import { parseVideoId, parseExternalLink } from '../lib/youtube.js';
 
 const mk = () => createStore(':memory:');
 
@@ -95,4 +95,18 @@ test('parseVideoId handles the common URL shapes', () => {
   ]) {
     assert.equal(parseVideoId(input), expected, input);
   }
+});
+
+test('parseExternalLink detects Spotify and Apple Music links', () => {
+  assert.deepEqual(parseExternalLink('https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8?si=abc'),
+    { type: 'spotify', url: 'https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8' });
+  assert.deepEqual(parseExternalLink('https://open.spotify.com/intl-zh-tw/track/4PTG3Z6ehGkBFwjybzWkR8'),
+    { type: 'spotify', url: 'https://open.spotify.com/intl-zh-tw/track/4PTG3Z6ehGkBFwjybzWkR8' });
+  assert.deepEqual(parseExternalLink('https://music.apple.com/tw/album/american-teen/1200868403?i=1200868616'),
+    { type: 'apple', id: '1200868616' });
+  assert.deepEqual(parseExternalLink('https://music.apple.com/tw/song/american-teen/1200868616'),
+    { type: 'apple', id: '1200868616' });
+  assert.equal(parseExternalLink('https://example.com/track/x'), null);
+  assert.equal(parseExternalLink('khalid american teen'), null);
+  assert.equal(parseExternalLink('https://open.spotify.com/user/someone'), null);
 });

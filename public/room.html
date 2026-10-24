@@ -47,6 +47,28 @@
                    border: none; border-radius: var(--radius); background: var(--accent); color: var(--on-accent); cursor: pointer; }
   .msg { padding: 0 16px 8px; font-size: 13px; color: var(--danger); min-height: 18px; }
 
+  /* search results panel */
+  #results { margin: 0 16px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+             background: var(--surface); overflow: hidden; display: none; }
+  #results.open { display: block; }
+  .rhead { display: flex; align-items: center; gap: 8px; padding: 10px 12px; font-size: 13px; color: var(--muted);
+           border-bottom: 1px solid var(--surface-2); }
+  .rhead .q { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rhead .q b { color: var(--text); font-weight: 600; }
+  .rhead button { display: flex; background: transparent; border: none; color: var(--muted); cursor: pointer; padding: 4px; }
+  .rcard { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--surface-2); }
+  .rcard:last-child { border-bottom: none; }
+  .rcard img { width: 72px; aspect-ratio: 16/9; object-fit: cover; border-radius: 7px; background: #000; flex-shrink: 0; }
+  .rcard .info { flex: 1; min-width: 0; }
+  .rcard .rt { font-size: 14px; line-height: 1.35; overflow: hidden;
+               display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .rcard .rc { font-size: 12px; color: var(--faint); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rcard .act { display: flex; color: var(--muted); flex-shrink: 0; }
+  .rcard.added { cursor: default; }
+  .rcard.added .rt { color: var(--accent); }
+  .rcard.added .act { color: var(--accent); }
+  @media (hover: hover) { .rcard:not(.added):hover { background: var(--surface-2); } }
+
   ul { list-style: none; padding: 0 10px; }
   li { display: flex; align-items: center; gap: 6px; padding: 8px 6px; border-bottom: 1px solid var(--surface-2);
        border-radius: 10px; }
@@ -154,10 +176,11 @@
 
 <div id="editView">
   <div class="addbar">
-    <input id="url" placeholder="貼 YouTube 連結加歌" inputmode="url" autocomplete="off">
-    <button id="add"><span class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span>加歌</button>
+    <input id="url" placeholder="打歌名搜尋，或貼 YouTube / Spotify / Apple Music 連結" autocomplete="off" enterkeyhint="search">
+    <button id="add"></button>
   </div>
   <div class="msg" id="msg"></div>
+  <div id="results"></div>
   <ul id="queue"></ul>
   <div class="empty" id="empty" style="display:none">還沒有歌 — 貼個 YouTube 連結開始吧</div>
 </div>
@@ -209,7 +232,9 @@
     speaker: `${SVG_OPEN}<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`,
     exit: `${SVG_OPEN}<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>`,
     check: `${SVG_OPEN}<path d="M20 6 9 17l-5-5"/></svg>`,
-    copy: `${SVG_OPEN}<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>`
+    copy: `${SVG_OPEN}<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>`,
+    plus: `${SVG_OPEN.replace('stroke-width="2"', 'stroke-width="2.5"')}<path d="M5 12h14"/><path d="M12 5v14"/></svg>`,
+    search: `${SVG_OPEN.replace('stroke-width="2"', 'stroke-width="2.5"')}<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`
   };
   const iconEl = (name) => {
     const span = document.createElement('span');
@@ -393,12 +418,98 @@
   $('next').onclick = () => (isPlayer ? playNext(1) : control('next'));
   $('prev').onclick = () => (isPlayer ? playNext(-1) : control('prev'));
 
+  // One input for everything: a YouTube link adds directly; anything else
+  // (song name, Spotify/Apple Music link) goes through server-side search.
+  const isYtInput = (v) => /^[\w-]{11}$/.test(v) || /(?:youtube\.com|youtu\.be|youtube-nocookie\.com)\//i.test(v);
+  let searching = false;
+
+  function setAddBtn() {
+    const v = $('url').value.trim();
+    const yt = isYtInput(v);
+    $('add').replaceChildren(iconEl(searching ? 'search' : (yt ? 'plus' : 'search')),
+      document.createTextNode(searching ? '搜尋中…' : (yt ? '加歌' : '搜尋')));
+    $('add').disabled = searching;
+  }
+  setAddBtn();
+  $('url').addEventListener('input', setAddBtn);
+
+  const closeResults = () => { $('results').classList.remove('open'); $('results').replaceChildren(); };
+
+  function renderResults(query, results) {
+    const box = $('results');
+    const head = document.createElement('div');
+    head.className = 'rhead';
+    const q = document.createElement('div');
+    q.className = 'q';
+    const qb = document.createElement('b');
+    qb.textContent = query;
+    q.append('「', qb, '」的結果 — 點一下加入');
+    const closeBtn = document.createElement('button');
+    closeBtn.append(iconEl('x'));
+    closeBtn.setAttribute('aria-label', '關閉結果');
+    closeBtn.onclick = closeResults;
+    head.append(q, closeBtn);
+
+    const cards = results.map((v) => {
+      const card = document.createElement('div');
+      card.className = 'rcard';
+      const img = document.createElement('img');
+      img.src = v.thumbnail;
+      img.loading = 'lazy';
+      img.alt = '';
+      const info = document.createElement('div');
+      info.className = 'info';
+      const rt = document.createElement('div');
+      rt.className = 'rt';
+      rt.textContent = v.title;
+      const rc = document.createElement('div');
+      rc.className = 'rc';
+      rc.textContent = [v.channel, v.duration].filter(Boolean).join(' · ');
+      info.append(rt, rc);
+      const act = document.createElement('span');
+      act.className = 'act';
+      act.append(iconEl('plus'));
+      card.append(img, info, act);
+      card.onclick = async () => {
+        if (card.classList.contains('added')) return;
+        const r = await api('/tracks', { url: `https://www.youtube.com/watch?v=${v.videoId}`, title: v.title });
+        if (!r.success) return flash(r.error);
+        card.classList.add('added');
+        act.replaceChildren(iconEl('check'));
+      };
+      return card;
+    });
+    box.replaceChildren(head, ...cards);
+    if (!results.length) {
+      const none = document.createElement('div');
+      none.className = 'rcard added';
+      none.textContent = '找不到結果 — 換個關鍵字試試';
+      box.append(none);
+    }
+    box.classList.add('open');
+  }
+
   $('add').onclick = async () => {
-    const url = $('url').value.trim();
-    if (!url) return;
-    const r = await api('/tracks', { url });
-    if (!r.success) return flash(r.error);
-    $('url').value = '';
+    const v = $('url').value.trim();
+    if (!v || searching) return;
+    if (isYtInput(v)) {
+      const r = await api('/tracks', { url: v });
+      if (!r.success) return flash(r.error);
+      $('url').value = '';
+      setAddBtn();
+      return;
+    }
+    searching = true;
+    setAddBtn();
+    try {
+      const r = await fetch(`/api/rooms/${roomId}/search?q=${encodeURIComponent(v)}`)
+        .then((x) => x.json()).catch(() => ({ success: false, error: '連不上伺服器' }));
+      if (!r.success) return flash(r.error);
+      renderResults(r.data.query, r.data.results);
+    } finally {
+      searching = false;
+      setAddBtn();
+    }
   };
   $('url').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('add').click(); });
 
